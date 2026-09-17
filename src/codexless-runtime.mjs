@@ -248,7 +248,7 @@ export async function createCodexlessRuntime({
           privateConstruction ? "agent-task-cards-private.json" : "agent-task-cards-workbench.json"
         )
   );
-  const maxConcurrent = 1;
+  const maxConcurrent = 4;
   const recentCallStore = privateConstruction ? createRecentCallReceiptStore() : null;
 
   let workbench = null;
