@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { createCommandExecutionState, DEFAULT_ASYNC_COMMAND_MAX_TIMEOUT_MS } from "./command-execution-state.mjs";
 import { registerAgentPreviewTools } from "./agent-tools.mjs";
 import { registerBrowserPreviewTools } from "./browser-tools.mjs";
 import { registerConstructionTools } from "./construction-tools.mjs";
@@ -77,6 +78,7 @@ export function createPublicServerFactory({
   agentPreviewState = null,
   recentCallDiagnostics,
   maxConcurrent = 1,
+  maxAsyncTimeoutMs = DEFAULT_ASYNC_COMMAND_MAX_TIMEOUT_MS,
 }) {
   if (!executor) throw new Error("Codexless public server requires an authority executor");
   if (!authorityExecutor) throw new Error("Codexless public server requires authorityExecutor");
@@ -87,19 +89,50 @@ export function createPublicServerFactory({
   if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1 || maxConcurrent > 4) {
     throw new Error("maxConcurrent must be an integer between 1 and 4");
   }
+  if (!Number.isInteger(maxAsyncTimeoutMs) || maxAsyncTimeoutMs < 30_000) {
+    throw new Error("maxAsyncTimeoutMs must be an integer greater than or equal to 30000");
+  }
+  const commandExecution = createCommandExecutionState({ executor, maxConcurrent });
 
-  const commandSchema = z.object({
+  const commandBaseShape = {
     command: z.array(z.string().max(32_768)).min(1).max(128)
       .describe("argv vector passed to official Codex command/exec under the locally resolved Codex permission profile"),
     cwd: z.string().min(1).max(32_768).optional()
       .describe("Optional local working-directory context. cwd does not let the caller select or widen a permission profile."),
     access: z.enum(["inherit", "readOnly"]).default("readOnly")
       .describe("readOnly is the safe compatibility default. inherit uses the locally authorized/resolved Codex permission profile."),
+  };
+  const commandSchema = z.object({
+    ...commandBaseShape,
     timeoutMs: z.number().int().positive().max(30_000).default(10_000),
   }).strict();
+  const commandStartSchema = z.object({
+    ...commandBaseShape,
+    timeoutMs: z.number().int().positive().max(maxAsyncTimeoutMs),
+  }).strict();
+  const commandPollSchema = z.object({ commandRef: z.string().min(1).max(256) }).strict();
 
-  return function createServer() {
-    let inFlight = 0;
+  function projectCommandResult(result, access) {
+    const payload = {
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      access,
+      surfaceVersion: PUBLIC_SURFACE_VERSION,
+    };
+    if (typeof result.stdoutTruncated === "boolean") payload.stdoutTruncated = result.stdoutTruncated;
+    if (typeof result.stderrTruncated === "boolean") payload.stderrTruncated = result.stderrTruncated;
+    if (typeof result.permissionCeiling === "string") payload.permissionCeiling = result.permissionCeiling;
+    if (typeof result.permissionProfile === "string") payload.permissionProfile = result.permissionProfile;
+    if (typeof result.effectiveCwd === "string") payload.cwd = result.effectiveCwd;
+    if (typeof result.authoritySource === "string") payload.authoritySource = result.authoritySource;
+    if (typeof result.trustedAncestor === "string") payload.trustedAncestor = result.trustedAncestor;
+    if (result.executableResolution && typeof result.executableResolution === "object") payload.executableResolution = result.executableResolution;
+    if (typeof result.resolutionSource === "string") payload.resolutionSource = result.resolutionSource;
+    return payload;
+  }
+
+  function createServer() {
     const server = new McpServer(
       {
         name: "codexless",
@@ -125,26 +158,9 @@ export function createPublicServerFactory({
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       },
       async ({ command, cwd, access, timeoutMs }) => {
-        if (inFlight >= maxConcurrent) return toolError(`bridge concurrency limit reached (${maxConcurrent})`);
-        inFlight += 1;
         try {
-          const result = await executor.exec({ command, cwd, access, timeoutMs });
-          const payload = {
-            exitCode: result.exitCode,
-            stdout: result.stdout,
-            stderr: result.stderr,
-            access,
-            surfaceVersion: PUBLIC_SURFACE_VERSION,
-          };
-          if (typeof result.stdoutTruncated === "boolean") payload.stdoutTruncated = result.stdoutTruncated;
-          if (typeof result.stderrTruncated === "boolean") payload.stderrTruncated = result.stderrTruncated;
-          if (typeof result.permissionCeiling === "string") payload.permissionCeiling = result.permissionCeiling;
-          if (typeof result.permissionProfile === "string") payload.permissionProfile = result.permissionProfile;
-          if (typeof result.effectiveCwd === "string") payload.cwd = result.effectiveCwd;
-          if (typeof result.authoritySource === "string") payload.authoritySource = result.authoritySource;
-          if (typeof result.trustedAncestor === "string") payload.trustedAncestor = result.trustedAncestor;
-          if (result.executableResolution && typeof result.executableResolution === "object") payload.executableResolution = result.executableResolution;
-          if (typeof result.resolutionSource === "string") payload.resolutionSource = result.resolutionSource;
+          const result = await commandExecution.exec({ command, cwd, access, timeoutMs });
+          const payload = projectCommandResult(result, access);
           return {
             content: [{ type: "text", text: JSON.stringify(payload) }],
             structuredContent: payload,
@@ -155,8 +171,49 @@ export function createPublicServerFactory({
             error instanceof Error ? error.message : String(error),
             error && typeof error === "object" ? { errorCode: error.code, nextActions: error.nextActions } : undefined
           );
-        } finally {
-          inFlight -= 1;
+        }
+      }
+    );
+
+    publicServer.registerTool(
+      "codex.command_start",
+      {
+        title: "Codex Model-Free Command (Async Start)",
+        description:
+          "Start one bounded asynchronous execution through the same official Codex command/exec authority path as codex.command_exec and return an opaque commandRef immediately. timeoutMs is required and finite. commandRef is an in-memory bearer capability and is not persisted across restart. An uncertain start response must not be blindly retried because execution may already have begun.",
+        inputSchema: commandStartSchema,
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+      },
+      async ({ command, cwd, access, timeoutMs }) => {
+        try {
+          const payload = { ...commandExecution.start({ command, cwd, access, timeoutMs }), surfaceVersion: PUBLIC_SURFACE_VERSION };
+          return { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload };
+        } catch (error) {
+          return toolError(error instanceof Error ? error.message : String(error));
+        }
+      }
+    );
+
+    publicServer.registerTool(
+      "codex.command_poll",
+      {
+        title: "Codex Model-Free Command (Async Poll)",
+        description:
+          "Read the state or terminal buffered result of one codex.command_start execution by opaque commandRef. Polling never re-executes the command. The ref is an unguessable bearer capability scoped to this runtime and expires after bounded terminal retention or restart.",
+        inputSchema: commandPollSchema,
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      async ({ commandRef }) => {
+        try {
+          const state = commandExecution.poll(commandRef);
+          const payload = state.status === "running"
+            ? { status: "running", commandRef, startedAt: state.startedAt, surfaceVersion: PUBLIC_SURFACE_VERSION }
+            : state.status === "completed"
+              ? { status: "completed", commandRef, startedAt: state.startedAt, completedAt: state.completedAt, ...projectCommandResult(state.result, state.input.access) }
+              : { status: "failed", commandRef, startedAt: state.startedAt, completedAt: state.completedAt, ...state.error, surfaceVersion: PUBLIC_SURFACE_VERSION };
+          return { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload };
+        } catch (error) {
+          return toolError(error instanceof Error ? error.message : String(error));
         }
       }
     );
@@ -173,7 +230,10 @@ export function createPublicServerFactory({
     });
     publicRegistration.assertComplete();
     return server;
-  };
+  }
+
+  createServer.drainCommands = () => commandExecution.drain();
+  return createServer;
 }
 
 function toolError(message, details = {}) {
