@@ -199,7 +199,7 @@ export function createPublicServerFactory({
       {
         title: "Codex Model-Free Command (Async Poll)",
         description:
-          "Read the state or terminal buffered result of one codex.command_start execution by opaque commandRef. Polling never re-executes the command. The ref is an unguessable bearer capability scoped to this runtime and expires after bounded terminal retention or restart.",
+          "Read the state or terminal buffered result of one codex.command_start execution by opaque commandRef. Polling never re-executes the command. The ref is an unguessable bearer capability scoped to this runtime. Terminal results have no wall-clock expiry; they remain pollable until displaced by bounded terminal-result retention or runtime restart.",
         inputSchema: commandPollSchema,
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },

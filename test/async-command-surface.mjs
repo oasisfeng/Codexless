@@ -179,7 +179,7 @@ try {
     arguments: { commandRef: drainingStart.structuredContent.commandRef },
   });
   assert.equal(oldRefAfterDrain.isError, true);
-  assert.match(oldRefAfterDrain.structuredContent.error, /unknown or expired commandRef/);
+  assert.match(oldRefAfterDrain.structuredContent.error, /unknown or retired commandRef/);
 } finally {
   await client.close().catch(() => {});
   await server.close().catch(() => {});

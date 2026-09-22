@@ -1,18 +1,15 @@
 import { randomUUID } from "node:crypto";
 
 export const DEFAULT_ASYNC_COMMAND_MAX_TIMEOUT_MS = 30 * 60_000;
-export const DEFAULT_COMMAND_RESULT_TTL_MS = 60 * 60_000;
 export const DEFAULT_MAX_TERMINAL_COMMANDS = 100;
 
 export function createCommandExecutionState({
   executor,
   maxConcurrent,
-  terminalTtlMs = DEFAULT_COMMAND_RESULT_TTL_MS,
   maxTerminalCommands = DEFAULT_MAX_TERMINAL_COMMANDS,
 } = {}) {
   if (!executor || typeof executor.exec !== "function") throw new Error("command execution state requires executor.exec");
   if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1) throw new Error("maxConcurrent must be a positive integer");
-  if (!Number.isInteger(terminalTtlMs) || terminalTtlMs <= 0) throw new Error("terminalTtlMs must be a positive integer");
   if (!Number.isInteger(maxTerminalCommands) || maxTerminalCommands < 1) throw new Error("maxTerminalCommands must be a positive integer");
 
   let accepting = true;
@@ -42,7 +39,6 @@ export function createCommandExecutionState({
     const current = jobs.get(commandRef);
     if (current !== job || current.status === "running") return;
     jobs.delete(commandRef);
-    if (job.retireTimer) clearTimeout(job.retireTimer);
   }
 
   function trimTerminalJobs() {
@@ -59,11 +55,10 @@ export function createCommandExecutionState({
     if (jobs.get(commandRef) !== job || job.status !== "running") return;
     job.status = terminal.status;
     job.completedAt = Date.now();
+    job.input = terminalInput(job.input);
     job.result = terminal.result ?? null;
     job.error = terminal.error ?? null;
     job.execution = null;
-    job.retireTimer = setTimeout(() => retireJob(commandRef, job), terminalTtlMs);
-    job.retireTimer.unref?.();
     trimTerminalJobs();
   }
 
@@ -78,7 +73,6 @@ export function createCommandExecutionState({
       result: null,
       error: null,
       execution: null,
-      retireTimer: null,
     };
     const execution = admit(input);
     job.execution = execution;
@@ -92,7 +86,7 @@ export function createCommandExecutionState({
 
   function poll(commandRef) {
     const job = jobs.get(commandRef);
-    if (!job) throw new Error(`unknown or expired commandRef: ${commandRef}`);
+    if (!job) throw new Error(`unknown or retired commandRef: ${commandRef}`);
     if (job.status === "running") {
       return { status: "running", commandRef, startedAt: job.startedAt, input: structuredClone(job.input) };
     }
@@ -114,7 +108,6 @@ export function createCommandExecutionState({
     }
     accepting = false;
     while (active.size) await Promise.allSettled([...active]);
-    for (const job of jobs.values()) if (job.retireTimer) clearTimeout(job.retireTimer);
     jobs.clear();
   }
 
@@ -124,6 +117,13 @@ export function createCommandExecutionState({
     poll,
     drain,
   };
+}
+
+function terminalInput(input) {
+  const retained = {};
+  if (typeof input?.access === "string") retained.access = input.access;
+  if (typeof input?.cwd === "string") retained.cwd = input.cwd;
+  return retained;
 }
 
 function serializeError(error) {
