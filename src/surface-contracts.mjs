@@ -5,13 +5,15 @@ export const STABLE_SOURCE_TOOL_COUNT = 1;
 
 export const WORKBENCH_SERVER_VERSION = "0.0.56-agent-task-card-v13-browser-admin38";
 export const WORKBENCH_SURFACE_VERSION = "p4-workbench-agent-task-card-v13-browser-admin38";
-export const WORKBENCH_SOURCE_TOOL_COUNT_WITH_CUA = 68;
-export const WORKBENCH_SOURCE_TOOL_COUNT_WITHOUT_CUA = 63;
+export const WORKBENCH_SOURCE_TOOL_COUNT_WITH_CUA = 70;
+export const WORKBENCH_SOURCE_TOOL_COUNT_WITHOUT_CUA = 65;
 
 export const PUBLIC_SERVER_VERSION = "0.1.2-preview.0";
 export const PUBLIC_SURFACE_VERSION = "codexless-public-preview-v1";
 export const PUBLIC_TOOL_ALLOWLIST = Object.freeze([
   "codex.command_exec",
+  "codex.command_start",
+  "codex.command_poll",
   "codex.project_context",
   "codex.account_preflight",
   "codex.skill_list",
@@ -56,6 +58,7 @@ export const PUBLIC_TOOL_ALLOWLIST = Object.freeze([
   "codex.agent_reject",
   "codex.agent_cancel",
 ]);
+export const PUBLIC_EXPECTED_TOOL_COUNT = 46;
 export const PUBLIC_SOURCE_TOOL_COUNT = PUBLIC_TOOL_ALLOWLIST.length;
 export const PUBLIC_TOOL_NAMES = PUBLIC_TOOL_ALLOWLIST;
 
@@ -69,6 +72,8 @@ export const HOUSEHOLD_SERVER_VERSION = "0.1.64-private-construction";
 export const HOUSEHOLD_SURFACE_VERSION = "p4-private-construction-v64";
 export const HOUSEHOLD_TOOL_ALLOWLIST = Object.freeze([
   "codex.command_exec",
+  "codex.command_start",
+  "codex.command_poll",
   "codex.project_context",
   "codex.account_preflight",
   "codex.fs_read",

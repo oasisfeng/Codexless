@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { createAgentPreviewState } from "./agent-tools.mjs";
+import { DEFAULT_ASYNC_COMMAND_MAX_TIMEOUT_MS } from "./command-execution-state.mjs";
 import { readJsonFile } from "./json-file.mjs";
 import {
   HOUSEHOLD_SERVER_VERSION,
@@ -248,7 +249,7 @@ export async function createCodexlessRuntime({
           privateConstruction ? "agent-task-cards-private.json" : "agent-task-cards-workbench.json"
         )
   );
-  const maxConcurrent = 1;
+  const maxConcurrent = 4;
   const recentCallStore = privateConstruction ? createRecentCallReceiptStore() : null;
 
   let workbench = null;
@@ -268,7 +269,7 @@ export async function createCodexlessRuntime({
       profileOverride,
       configOverrides,
       launchEnv: modelFreeLaunchEnv,
-      maxTimeoutMs: 30_000,
+      maxTimeoutMs: DEFAULT_ASYNC_COMMAND_MAX_TIMEOUT_MS,
       watchdogGraceMs: 5_000,
       outputBytesCap: 32_768,
       allowUntrustedReadOnlyBootstrap: modelFreeRuntime.lane === "managed",
@@ -672,6 +673,7 @@ export async function createCodexlessRuntime({
     async function close() {
       if (closed) return;
       closed = true;
+      await createServer.drainCommands?.();
       try {
         await agentExecutor?.close();
       } finally {

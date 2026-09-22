@@ -31,6 +31,7 @@ The first Technical Preview contains only these runtime source files:
 - `src/browser-tools.mjs` — byte-for-byte household canonical Browser registration
 - `src/codex-browser-executor.mjs` — byte-for-byte household canonical Browser implementation
 - `src/public-browser-workbench-adapter.mjs` — public-context adapter only; it does not reimplement Browser behavior
+- `src/command-execution-state.mjs` — shared bounded lifecycle state for synchronous/asynchronous `command/exec`; it does not expose host process/PTY control
 - `src/codex-agent-executor.mjs`
 - `src/codex-app-server-client.mjs`
 - `src/codex-authority-executor.mjs`
