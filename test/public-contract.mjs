@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { resolveCodexExecutable } from "../src/codex-bin.mjs";
-import { PUBLIC_SURFACE_VERSION, PUBLIC_TOOL_NAMES } from "../src/surface-contracts.mjs";
+import { PUBLIC_EXPECTED_TOOL_COUNT, PUBLIC_SURFACE_VERSION, PUBLIC_TOOL_NAMES } from "../src/surface-contracts.mjs";
 
 const require = createRequire(import.meta.url);
 const { Client, StreamableHTTPClientTransport } = require("@modelcontextprotocol/client");
@@ -41,7 +41,8 @@ function createIsolatedPublicTestEnv(extra = {}) {
 }
 
 assert.equal(PUBLIC_SURFACE_VERSION, "codexless-public-preview-v1");
-assert.equal(PUBLIC_TOOL_NAMES.length, 46);
+assert.equal(PUBLIC_EXPECTED_TOOL_COUNT, 46);
+assert.equal(PUBLIC_TOOL_NAMES.length, PUBLIC_EXPECTED_TOOL_COUNT);
 for (const relative of [
   "src/browser-tools.mjs",
   "src/codex-browser-executor.mjs",

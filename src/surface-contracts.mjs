@@ -58,6 +58,7 @@ export const PUBLIC_TOOL_ALLOWLIST = Object.freeze([
   "codex.agent_reject",
   "codex.agent_cancel",
 ]);
+export const PUBLIC_EXPECTED_TOOL_COUNT = 46;
 export const PUBLIC_SOURCE_TOOL_COUNT = PUBLIC_TOOL_ALLOWLIST.length;
 export const PUBLIC_TOOL_NAMES = PUBLIC_TOOL_ALLOWLIST;
 
