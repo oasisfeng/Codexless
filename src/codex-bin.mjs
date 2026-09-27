@@ -1,4 +1,4 @@
-import { access, readdir } from "node:fs/promises";
+import { access, readFile, readdir } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -162,6 +162,49 @@ async function windowsCodexCandidates(env) {
   return candidates;
 }
 
+const DEFAULT_CHATGPT_APP_RESOURCES = "/Applications/ChatGPT.app/Contents/Resources";
+
+export async function chatGptBundledCodexCandidates({
+  resourcesRoot = DEFAULT_CHATGPT_APP_RESOURCES,
+} = {}) {
+  const root = path.resolve(resourcesRoot);
+  const packageRoot = path.join(root, "codex-cli");
+  const candidates = [];
+
+  try {
+    const manifest = JSON.parse(await readFile(path.join(packageRoot, "codex-package.json"), "utf8"));
+    const entrypoint = typeof manifest?.entrypoint === "string" ? manifest.entrypoint.trim() : "";
+    if (entrypoint && !path.isAbsolute(entrypoint)) {
+      const resolvedEntrypoint = path.resolve(packageRoot, entrypoint);
+      const relative = path.relative(packageRoot, resolvedEntrypoint);
+      if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
+        candidates.push({
+          path: resolvedEntrypoint,
+          source: "chatgpt-app-bundled-manifest",
+          label: "ChatGPT.app:codex-package-entrypoint",
+        });
+      }
+    }
+  } catch {
+    // Older ChatGPT bundles have no package manifest; keep known-layout fallbacks below.
+  }
+
+  const currentLayout = path.join(packageRoot, "bin", "codex");
+  if (!candidates.some((candidate) => path.resolve(candidate.path) === currentLayout)) {
+    candidates.push({
+      path: currentLayout,
+      source: "chatgpt-app-bundled",
+      label: "ChatGPT.app:codex-cli/bin/codex",
+    });
+  }
+  candidates.push({
+    path: path.join(root, "codex"),
+    source: "chatgpt-app-bundled",
+    label: "ChatGPT.app:legacy-bundled-codex",
+  });
+  return candidates;
+}
+
 async function posixCodexCandidates(env) {
   const candidates = [];
   const cliPath = env.CODEX_CLI_PATH?.trim();
@@ -176,11 +219,7 @@ async function posixCodexCandidates(env) {
     });
   }
   if (process.platform === "darwin") {
-    candidates.push({
-      path: "/Applications/ChatGPT.app/Contents/Resources/codex",
-      source: "chatgpt-app-bundled",
-      label: "ChatGPT.app:bundled-codex",
-    });
+    candidates.push(...await chatGptBundledCodexCandidates());
   }
   const found = whichFirst("codex");
   if (found) candidates.push({ path: found, source: "PATH", label: "PATH:codex" });
