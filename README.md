@@ -201,7 +201,7 @@ The permission ceiling follows effective local Codex authorization. Codexless ma
 
 ### Does ChatGPT get everything Codex can do?
 
-No. The **0.1.2 public contract is 44 tools**, selected and tested as a public surface. Internal or household-only capabilities are not automatically promoted.
+No. The **0.1.2 public contract is 46 tools**, selected and tested as a public surface. Internal or household-only capabilities are not automatically promoted.
 
 ### Do I need to change my existing ChatGPT → Codex workflow?
 
@@ -220,7 +220,7 @@ Do not put Tunnel or endpoint credentials in the repository or public screenshot
 ## For people who want the internals
 
 - The exact public service contract is fixed in `src/surface-contracts.mjs` and covered by public contract tests.
-- The 0.1.2 public surface contains **44 tools**. Call Codex uses fixed-text Approval / Result in normal Chat; neutral `agent_commit(taskId)` / `agent_decline(taskId)` remain part of the authoritative task path.
+- The 0.1.2 public surface contains **46 tools**. `command_start` / `command_poll` add bounded asynchronous `command/exec` lifecycle without exposing the host-process lane. Call Codex uses fixed-text Approval / Result in normal Chat; neutral `agent_commit(taskId)` / `agent_decline(taskId)` remain part of the authoritative task path.
 - Public Excel contains the six typed tools listed above. The schema-reader and dynamic Excel gateway remain household-only in this release.
 - Browser exposes reviewed user-intent actions rather than raw browser internals.
 - Codex remains the local permission/trust authority; Codexless can downscope but not silently widen it.

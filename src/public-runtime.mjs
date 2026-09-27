@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { createAgentPreviewState } from "./agent-tools.mjs";
+import { DEFAULT_ASYNC_COMMAND_MAX_TIMEOUT_MS } from "./command-execution-state.mjs";
 import { CodexAgentExecutor } from "./codex-agent-executor.mjs";
 import { CodexAuthorityExecutor } from "./codex-authority-executor.mjs";
 import { CodexBrowserExecutor } from "./codex-browser-executor.mjs";
@@ -109,7 +110,7 @@ export async function createPublicRuntime({ env = process.env } = {}) {
       defaultCwd,
       profileOverride,
       configOverrides,
-      maxTimeoutMs: 30_000,
+      maxTimeoutMs: DEFAULT_ASYNC_COMMAND_MAX_TIMEOUT_MS,
       watchdogGraceMs: 5_000,
       outputBytesCap: 32_768,
       acceptedCodexVersions: null,
@@ -200,6 +201,7 @@ export async function createPublicRuntime({ env = process.env } = {}) {
     async function close() {
       if (closed) return;
       closed = true;
+      await createServer.drainCommands?.();
       try {
         await agentExecutor?.close();
       } finally {

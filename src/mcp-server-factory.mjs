@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { createCommandExecutionState, DEFAULT_ASYNC_COMMAND_MAX_TIMEOUT_MS } from "./command-execution-state.mjs";
 import { registerAgentPreviewTools } from "./agent-tools.mjs";
 import { registerBrowserPreviewTools } from "./browser-tools.mjs";
 import { registerConstructionTools } from "./construction-tools.mjs";
@@ -17,6 +18,7 @@ export function createCodexToolboxServerFactory({
   executor,
   maxConcurrent = 2,
   maxTimeoutMs = DEFAULT_MAX_TIMEOUT_MS,
+  maxAsyncTimeoutMs = DEFAULT_ASYNC_COMMAND_MAX_TIMEOUT_MS,
   version = "0.0.1-p2",
   serverInstructions = "P2 exposes only codex.command_exec. Each call starts a disposable Docker-isolated Codex App Server. The host chooses one fixed trusted workspace; callers cannot select host paths. Network is disabled and no Docker socket is mounted.",
   commandDescription = "Run one buffered argv command through the official Codex App Server command/exec surface without a Codex model thread/turn. The host fixes the only visible workspace. readOnly mounts that workspace RO; workspaceWrite mounts the same workspace RW. Network is disabled.",
@@ -59,6 +61,9 @@ export function createCodexToolboxServerFactory({
   if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1 || maxConcurrent > 4) {
     throw new Error("maxConcurrent must be an integer between 1 and 4");
   }
+  if (!Number.isInteger(maxAsyncTimeoutMs) || maxAsyncTimeoutMs < maxTimeoutMs) {
+    throw new Error("maxAsyncTimeoutMs must be an integer greater than or equal to maxTimeoutMs");
+  }
   if (!Array.isArray(accessModes) || accessModes.length < 1 || !accessModes.every((value) => typeof value === "string" && value)) {
     throw new Error("accessModes must be a non-empty string array");
   }
@@ -67,7 +72,7 @@ export function createCodexToolboxServerFactory({
   }
   const allowedTools = normalizeToolAllowlist(toolAllowlist);
 
-  let inFlight = 0;
+  const commandExecution = createCommandExecutionState({ executor, maxConcurrent });
 
   const commandShape = {
     command: z.array(z.string().max(32_768)).min(1).max(128)
@@ -82,8 +87,57 @@ export function createCodexToolboxServerFactory({
     commandShape.cwd = cwdRequired ? cwdSchema : cwdSchema.optional();
   }
   const commandSchema = z.object(commandShape).strict();
+  const commandStartSchema = z.object({
+    ...commandShape,
+    timeoutMs: z.number().int().positive().max(maxAsyncTimeoutMs)
+      .describe("Required finite command timeout in milliseconds for this asynchronous execution."),
+  }).strict();
+  const commandPollSchema = z.object({
+    commandRef: z.string().min(1).max(256)
+      .describe("Opaque bearer capability returned by codex.command_start."),
+  }).strict();
 
-  return function createServer() {
+  function directCodexGuardFor(command) {
+    return guardDirectFormalCodex
+      ? (publicPreview ? classifyAnyCodexInvocation(command) : classifyFormalCodexInvocation(command))
+      : null;
+  }
+
+  function projectCommandResult(result, { access, cwd }) {
+    const payload = {
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      access,
+    };
+    if (typeof result.stdoutTruncated === "boolean") payload.stdoutTruncated = result.stdoutTruncated;
+    if (typeof result.stderrTruncated === "boolean") payload.stderrTruncated = result.stderrTruncated;
+    if (typeof result.permissionCeiling === "string") payload.permissionCeiling = result.permissionCeiling;
+    if (typeof result.permissionProfile === "string") payload.permissionProfile = result.permissionProfile;
+    if (typeof result.effectiveCwd === "string") payload.cwd = result.effectiveCwd;
+    if (typeof result.authoritySource === "string") payload.authoritySource = result.authoritySource;
+    if (typeof result.trustedAncestor === "string") payload.trustedAncestor = result.trustedAncestor;
+    if (result.executableResolution && typeof result.executableResolution === "object") payload.executableResolution = result.executableResolution;
+    if (typeof result.resolutionSource === "string") payload.resolutionSource = result.resolutionSource;
+    if (typeof result.errorCode === "string") payload.errorCode = result.errorCode;
+    if (typeof result.diagnostic === "string") payload.diagnostic = result.diagnostic;
+    if (Array.isArray(result.nextActions) && result.nextActions.every((value) => typeof value === "string")) {
+      payload.nextActions = result.nextActions;
+    }
+    if (typeof surfaceVersion === "string" && surfaceVersion) payload.surfaceVersion = surfaceVersion;
+    if (exposeCwd) payload.cwdSource = typeof cwd === "string" && cwd.trim() ? "remote" : "localDefault";
+    if (warnWhenUsingDefaultCwd && exposeCwd && !(typeof cwd === "string" && cwd.trim())) {
+      payload.compatibilityWarning =
+        "cwd was not provided, so Codexless used its local default cwd. This can indicate a stale ChatGPT App action schema that does not expose the current cwd field; re-scan/recreate the Codexless App before cross-project work.";
+      payload.nextActions = [
+        "Use this connector only for the reported default cwd until its action schema is refreshed.",
+        "Re-scan/recreate the Codexless ChatGPT App against the current compatibility tunnel to expose command/cwd/access/timeoutMs.",
+      ];
+    }
+    return payload;
+  }
+
+  function createServer() {
     const server = new McpServer(
       {
         name: "codexless",
@@ -138,52 +192,16 @@ export function createCodexToolboxServerFactory({
         },
       },
       async ({ command, access, timeoutMs, cwd }) => {
-        const directCodexGuard = guardDirectFormalCodex
-          ? (publicPreview ? classifyAnyCodexInvocation(command) : classifyFormalCodexInvocation(command))
-          : null;
+        const directCodexGuard = directCodexGuardFor(command);
         if (directCodexGuard) {
           return toolError(directCodexGuard.message, {
             errorCode: "FORMAL_CODEX_AGENT_REQUIRED",
             nextActions: directCodexGuard.nextActions,
           });
         }
-        if (inFlight >= maxConcurrent) {
-          return toolError(`bridge concurrency limit reached (${maxConcurrent})`);
-        }
-
-        inFlight += 1;
         try {
-          const result = await executor.exec({ command, access, timeoutMs, cwd });
-          const payload = {
-            exitCode: result.exitCode,
-            stdout: result.stdout,
-            stderr: result.stderr,
-            access,
-          };
-          if (typeof result.stdoutTruncated === "boolean") payload.stdoutTruncated = result.stdoutTruncated;
-          if (typeof result.stderrTruncated === "boolean") payload.stderrTruncated = result.stderrTruncated;
-          if (typeof result.permissionCeiling === "string") payload.permissionCeiling = result.permissionCeiling;
-          if (typeof result.permissionProfile === "string") payload.permissionProfile = result.permissionProfile;
-          if (typeof result.effectiveCwd === "string") payload.cwd = result.effectiveCwd;
-          if (typeof result.authoritySource === "string") payload.authoritySource = result.authoritySource;
-          if (typeof result.trustedAncestor === "string") payload.trustedAncestor = result.trustedAncestor;
-          if (result.executableResolution && typeof result.executableResolution === "object") payload.executableResolution = result.executableResolution;
-          if (typeof result.resolutionSource === "string") payload.resolutionSource = result.resolutionSource;
-          if (typeof result.errorCode === "string") payload.errorCode = result.errorCode;
-          if (typeof result.diagnostic === "string") payload.diagnostic = result.diagnostic;
-          if (Array.isArray(result.nextActions) && result.nextActions.every((value) => typeof value === "string")) {
-            payload.nextActions = result.nextActions;
-          }
-          if (typeof surfaceVersion === "string" && surfaceVersion) payload.surfaceVersion = surfaceVersion;
-          if (exposeCwd) payload.cwdSource = typeof cwd === "string" && cwd.trim() ? "remote" : "localDefault";
-          if (warnWhenUsingDefaultCwd && exposeCwd && !(typeof cwd === "string" && cwd.trim())) {
-            payload.compatibilityWarning =
-              "cwd was not provided, so Codexless used its local default cwd. This can indicate a stale ChatGPT App action schema that does not expose the current cwd field; re-scan/recreate the Codexless App before cross-project work.";
-            payload.nextActions = [
-              "Use this connector only for the reported default cwd until its action schema is refreshed.",
-              "Re-scan/recreate the Codexless ChatGPT App against the current compatibility tunnel to expose command/cwd/access/timeoutMs.",
-            ];
-          }
+          const result = await commandExecution.exec({ command, access, timeoutMs, cwd });
+          const payload = projectCommandResult(result, { access, cwd });
           return {
             content: [{ type: "text", text: JSON.stringify(payload) }],
             structuredContent: payload,
@@ -196,8 +214,78 @@ export function createCodexToolboxServerFactory({
               ? { errorCode: error.code, nextActions: error.nextActions }
               : undefined
           );
-        } finally {
-          inFlight -= 1;
+        }
+      }
+    );
+
+    registrationServer.registerTool(
+      "codex.command_start",
+      {
+        title: `${toolTitle} (Async Start)`,
+        description:
+          "Start one bounded asynchronous execution through the same official Codex command/exec authority path as codex.command_exec and return an opaque commandRef immediately. timeoutMs is required and finite. The commandRef is a bearer capability for polling this in-memory runtime result; it is not persisted across Codexless restart. A lost or uncertain start response must not be blindly retried because execution may already have begun.",
+        inputSchema: commandStartSchema,
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint },
+      },
+      async ({ command, access, timeoutMs, cwd }) => {
+        const directCodexGuard = directCodexGuardFor(command);
+        if (directCodexGuard) {
+          return toolError(directCodexGuard.message, {
+            errorCode: "FORMAL_CODEX_AGENT_REQUIRED",
+            nextActions: directCodexGuard.nextActions,
+          });
+        }
+        try {
+          const payload = commandExecution.start({ command, access, timeoutMs, cwd });
+          if (typeof surfaceVersion === "string" && surfaceVersion) payload.surfaceVersion = surfaceVersion;
+          return { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload };
+        } catch (error) {
+          return toolError(
+            error instanceof Error ? error.message : String(error),
+            error && typeof error === "object"
+              ? { errorCode: error.code, nextActions: error.nextActions }
+              : undefined
+          );
+        }
+      }
+    );
+
+    registrationServer.registerTool(
+      "codex.command_poll",
+      {
+        title: `${toolTitle} (Async Poll)`,
+        description:
+          "Read the state or terminal buffered result of one asynchronous codex.command_start execution by opaque commandRef. Polling never re-executes the command. The ref is an unguessable bearer capability scoped to this Codexless runtime. Terminal results have no wall-clock expiry; they remain pollable until displaced by bounded terminal-result retention or runtime restart.",
+        inputSchema: commandPollSchema,
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      async ({ commandRef }) => {
+        try {
+          const state = commandExecution.poll(commandRef);
+          let payload;
+          if (state.status === "running") {
+            payload = { status: "running", commandRef, startedAt: state.startedAt };
+          } else if (state.status === "completed") {
+            payload = {
+              status: "completed",
+              commandRef,
+              startedAt: state.startedAt,
+              completedAt: state.completedAt,
+              ...projectCommandResult(state.result, state.input),
+            };
+          } else {
+            payload = {
+              status: "failed",
+              commandRef,
+              startedAt: state.startedAt,
+              completedAt: state.completedAt,
+              ...state.error,
+            };
+            if (typeof surfaceVersion === "string" && surfaceVersion) payload.surfaceVersion = surfaceVersion;
+          }
+          return { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload };
+        } catch (error) {
+          return toolError(error instanceof Error ? error.message : String(error));
         }
       }
     );
@@ -240,7 +328,10 @@ export function createCodexToolboxServerFactory({
     }
 
     return server;
-  };
+  }
+
+  createServer.drainCommands = () => commandExecution.drain();
+  return createServer;
 }
 
 const WRAPPED_CODEX_COMMAND_TOKEN_RE = /(?:^|[\s\"'`;&|(),])(?:[^\s\"'`;&|(),]*[\\/])?codex(?:\.(?:exe|com|cmd|bat|ps1))?(?=$|[\s\"'`;&|(),])/i;
